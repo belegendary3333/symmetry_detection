@@ -1,241 +1,242 @@
 import sys
-import cv2
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
 import glob
 
+# 尝试导入必要的依赖
+try:
+    import cv2
+except ImportError:
+    print("错误: 无法导入 cv2 模块")
+    print("解决方案: 请运行以下命令安装 OpenCV:")
+    print("python -m pip install opencv-python")
+    sys.exit(1)
 
-class Mirror_Symmetry_detection:
-    def __init__(self, image_path: str):
-        # 读取原图并转为灰度图
-        self.image = cv2.imread(image_path)
-        if self.image is None:
-            raise ValueError(f"无法读取图像: {image_path}")
-        self.gray_image = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    print("错误: 无法导入 matplotlib 模块")
+    print("解决方案: 请运行以下命令安装 matplotlib:")
+    print("python -m pip install matplotlib")
+    sys.exit(1)
 
-        # 生成水平翻转的镜像图像（用于对称特征匹配）
+try:
+    import numpy as np
+except ImportError:
+    print("错误: 无法导入 numpy 模块")
+    print("解决方案: 请运行以下命令安装 numpy:")
+    print("python -m pip install numpy")
+    sys.exit(1)
+
+# 创建sift特征检测器
+sift = cv2.SIFT_create()
+# 创建 BFMatcher 对象
+bf = cv2.BFMatcher()
+
+
+def detecting_mirrorLine(title, picture_name, show_detail=False):
+    """
+    主要功能：检测图像的镜像对称轴并进行可视化展示
+    """
+    # 创建镜像对称检测对象
+    mirror = Mirror_symmetry_detection(picture_name)
+
+    # 寻找匹配点
+    match_points = mirror.find_matchpoints()
+
+    # 计算对称轴参数
+    r_list, theta_list = mirror.find_point_r_theta(match_points)
+
+    # 可视化匹配点
+    if show_detail:
+        mirror.draw_matches(match_points, top=10)
+        mirror.draw_hex(r_list, theta_list)
+
+    # 根据六边形图的计数进行排序
+    image_hexbin = plt.hexbin(r_list, theta_list, bins=200, cmap=plt.cm.Spectral_r)
+    sorted_vote = mirror.sort_hexbin_by_votes(image_hexbin)
+    r, theta = mirror.find_coordinate_maxhexbin(image_hexbin, sorted_vote, vertical=True)
+
+    # 绘制镜像对称轴
+    mirror.draw_mirrorLine(r, theta, title)
+
+
+def test_case(files_path):
+    """
+    测试用例:对指定路径下的图像文件进行镜像对称检测
+    """
+    files = sorted([f for f in glob.glob(files_path)])
+    # 修复参数顺序错误
+    for file in files:
+        detecting_mirrorLine("With Mirror Line", file)
+
+
+class Mirror_symmetry_detection:
+    def __init__(self, image_path):
+        self.image = self._read_color_image(image_path)
         self.reflected_image = np.fliplr(self.image)
-        self.reflected_gray = cv2.cvtColor(self.reflected_image, cv2.COLOR_BGR2GRAY)
 
-        # 初始化特征检测器：优先使用 SIFT，若不可用则回退到 ORB
-        try:
-            self.detector = cv2.SIFT_create()
-            self.is_sift = True
-        except Exception:
-            try:
-                # 一些旧版 OpenCV 可能在 xfeatures2d 中
-                self.detector = cv2.xfeatures2d.SIFT_create()
-                self.is_sift = True
-            except Exception:
-                # 回退到 ORB（无专利问题）
-                self.detector = cv2.ORB_create(nfeatures=2000)
-                self.is_sift = False
+        # 用SIFT检测关键点和描述符
+        self.keypoints1, self.descriptors1 = sift.detectAndCompute(self.image, None)
+        self.keypoints2, self.descriptors2 = sift.detectAndCompute(self.reflected_image, None)
 
-        # 提取特征（OpenCV 接口）
-        self.kp1, self.des1 = self.detector.detectAndCompute(self.gray_image, None)
-        self.kp2, self.des2 = self.detector.detectAndCompute(self.reflected_gray, None)
-
-        # OpenCV KeyPoint 列表可以直接用于绘制
-        self.cv_kp1 = self.kp1 if self.kp1 is not None else []
-        self.cv_kp2 = self.kp2 if self.kp2 is not None else []
+    def _read_color_image(self, image_path):
+        """
+        读取彩色图像:将图像路径作为输入，返回读取的彩色图像
+        """
+        image = cv2.imread(image_path)
+        # 增加图像读取失败检查
+        if image is None:
+            raise FileNotFoundError(f"无法读取图像文件: {image_path}，请检查路径是否正确或文件是否存在")
+        b, g, r = cv2.split(image)
+        image = cv2.merge([r, g, b])  # 转换为RGB格式
+        return image
 
     def find_matchpoints(self):
-        """使用暴力匹配器筛选优质特征匹配对"""
-        if self.des1 is None or self.des2 is None:
-            return []
+        """
+        寻找匹配点:使用BFMatcher找到原图像和镜像图像之间的匹配点
+        """
+        matches = bf.knnMatch(self.descriptors1, self.descriptors2, k=2)
 
-        # 根据描述子类型选择距离度量
-        norm_type = cv2.NORM_L2 if self.is_sift else cv2.NORM_HAMMING
-        bf = cv2.BFMatcher(norm_type)
-
-        # K-近邻匹配（k=2）
-        matches = bf.knnMatch(self.des1, self.des2, k=2)
-
-        # 应用Lowe's比率测试筛选可靠匹配
+        # 仅保留优质匹配点（使用Lowe's ratio test）
         good_matches = []
-        for pair in matches:
-            if len(pair) < 2:
-                continue
-            m, n = pair[0], pair[1]
-            # ratio 可根据算法选择
+        for m, n in matches:
             if m.distance < 0.75 * n.distance:
                 good_matches.append(m)
 
-        # 按匹配距离排序（距离越小越优）
-        return sorted(good_matches, key=lambda x: x.distance)
+        # 按距离排序
+        good_matches = sorted(good_matches, key=lambda x: x.distance)
+        return good_matches
 
-    @staticmethod
-    def angle_with_x_axis(x1, y1, x2, y2):
-        """计算两点连线与x轴的夹角（弧度）"""
-        dx = x2 - x1
-        dy = y2 - y1
-        return np.arctan2(dy, dx)
-
-    @staticmethod
-    def midpoint(x1, y1, x2, y2):
-        """计算两点的中点坐标"""
-        return (x1 + x2) / 2, (y1 + y2) / 2
-
-    def find_points_r_theta(self, matches):
-        """计算匹配点对的极坐标(r, theta)，用于对称轴投票"""
+    def find_point_r_theta(self, match_points: list):
+        """
+        计算对称轴参数:根据匹配点计算镜像对称轴的参数（r和theta）
+        """
         r_list = []
         theta_list = []
-        for match in matches:
-            idx1 = match.queryIdx
-            idx2 = match.trainIdx
+        h, w = self.image.shape[:2]  # 获取图像尺寸
 
-            # 使用 OpenCV KeyPoint 的 pt 属性获取坐标
-            x1, y1 = self.kp1[idx1].pt
-            x2, y2 = self.kp2[idx2].pt
+        for match in match_points:
+            pt1 = self.keypoints1[match.queryIdx].pt
+            pt2 = self.keypoints2[match.trainIdx].pt
 
-            theta = self.angle_with_x_axis(x1, y1, x2, y2)
-            xc, yc = self.midpoint(x1, y1, x2, y2)
+            # 修复镜像点坐标转换错误
+            pt2 = (w - pt2[0], pt2[1])  # 镜像图像的点映射回原图像坐标系
+
+            # 计算两点连线与x轴的夹角
+            theta = angle_with_x_axis(pt1, pt2)
+            # 计算中点
+            xc, yc = midpoint(pt1, pt2)
+            # 计算r参数
             r = xc * np.cos(theta) + yc * np.sin(theta)
-
             r_list.append(r)
             theta_list.append(theta)
         return r_list, theta_list
 
-    def draw_matches(self, matches, num_matches=10):
-        """绘制前N个最佳匹配的特征点对"""
-        if not matches:
-            print("无匹配点可绘制")
-            return
-
-        # cv2.drawMatches 支持直接传入 OpenCV KeyPoint 列表
-        matched_img = cv2.drawMatches(
-            self.image, self.cv_kp1,
-            self.reflected_image, self.cv_kp2,
-            matches[:num_matches],
-            None,
-            flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+    def draw_matches(self, match_points, top=10):
+        """
+        可视化匹配点:在图像上绘制匹配点连线以进行可视化
+        """
+        # 修复变量名错误（kp1 -> keypoints1, kp2 -> keypoints2）
+        img = cv2.drawMatches(
+            self.image, self.keypoints1,
+            self.reflected_image, self.keypoints2,
+            match_points[:top], None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
         )
-
-        plt.figure(figsize=(15, 8))
-        plt.imshow(cv2.cvtColor(matched_img, cv2.COLOR_BGR2RGB))
-        plt.title(f"Top {num_matches} 特征匹配对")
+        plt.figure(figsize=(10, 5))
+        plt.imshow(img)
+        plt.title(f"Top {top} pairs of symmetry points")
         plt.axis('off')
         plt.show()
 
     def draw_hex(self, r_list, theta_list):
-        """绘制极坐标投票的六边形直方图，可视化对称轴分布"""
-        if not r_list or not theta_list:
-            print("无投票数据可绘制")
-            return None
-
-        theta_deg = [np.rad2deg(theta) for theta in theta_list]
-
-        plt.figure(figsize=(10, 8))
-        hexbin = plt.hexbin(theta_deg, r_list, gridsize=30, cmap='viridis')
-        plt.colorbar(hexbin, label='投票数')
-        plt.xlabel('角度 (度)')
-        plt.ylabel('r值')
-        plt.title('对称特征投票分布')
+        """
+        绘制六边形图:根据r和theta列表绘制六边形图以展示对称轴参数分布
+        """
+        plt.figure(figsize=(8, 6))
+        image_hexbin = plt.hexbin(r_list, theta_list, bins=200, cmap=plt.cm.Spectral_r)
+        plt.colorbar(label='Counts')
+        plt.xlabel('r')
+        plt.ylabel('theta')
+        plt.title('Hexbin plot of symmetry axes parameters')
         plt.show()
-        return hexbin
 
-    @staticmethod
-    def sort_hexbin_by_votes(hexbin):
-        """按投票数降序排列直方图单元"""
-        if hexbin is None:
-            return np.array([], dtype=int), np.array([], dtype=int)
-        counts = hexbin.get_array()
-        if counts is None or counts.size == 0:
-            return np.array([], dtype=int), counts
-        non_zero_idx = np.where(counts > 0)[0]
-        sorted_idx = non_zero_idx[np.argsort(-counts[non_zero_idx])]
-        return sorted_idx, counts
+    def find_coordinate_maxhexbin(self, image_hexbin, sorted_vote, vertical):
+        """
+        找到最大六边形图的坐标:返回最大六边形图的r和theta值
+        """
+        for k, v in sorted_vote.items():
+            if vertical:
+                return k[0], k[1]
+            else:
+                # 排除水平对称轴（theta接近0或pi）
+                if not np.isclose(k[1], 0) and not np.isclose(k[1], np.pi):
+                    return k[0], k[1]
+        # 处理没有找到符合条件的情况
+        return 0, np.pi / 2  # 默认返回垂直中线
 
-    @staticmethod
-    def find_coordinate_maxhexbin(hexbin, sorted_idx):
-        """找到投票最高的单元对应的(r, theta)"""
-        if getattr(sorted_idx, "size", None) is not None:
-            if sorted_idx.size == 0:
-                return None, None
-        elif not sorted_idx:
-            return None, None
+    def sort_hexbin_by_votes(self, image_hexbin):
+        """
+        根据hexbin的计数对其进行排序
+        """
+        counts = image_hexbin.get_array()
+        verts = image_hexbin.get_offsets()
+        output = {}
 
-        verts = hexbin.get_offsets()
-        if verts is None or len(verts) == 0:
-            return None, None
+        for offc in range(verts.shape[0]):
+            binx, biny = verts[offc][0], verts[offc][1]
+            if counts[offc] > 0:  # 只保留有计数的点
+                output[(binx, biny)] = counts[offc]
 
-        max_theta_deg, max_r = verts[sorted_idx[0]]
-        max_theta = np.deg2rad(max_theta_deg)
-        return max_r, max_theta
+        # 按计数降序排序
+        return {k: v for k, v in sorted(output.items(), key=lambda item: item[1], reverse=True)}
 
-    def draw_mirrorLine(self, r, theta):
-        """根据极坐标(r, theta)绘制镜像对称轴"""
-        if r is None or theta is None:
-            print("无法确定对称轴")
-            return
+    def draw_mirrorLine(self, r, theta, title: str):
+        """
+        绘制镜像对称轴:在图像上绘制计算得到的镜像对称轴
+        """
+        # 创建图像副本以避免修改原图
+        img_with_line = self.image.copy()
+        h, w = img_with_line.shape[:2]
 
-        img_copy = self.image.copy()
-        h, w = img_copy.shape[:2]
+        # 绘制对称轴
+        if np.isclose(np.cos(theta), 0):  # 垂直线
+            x = int(r / np.sin(theta)) if not np.isclose(np.sin(theta), 0) else 0
+            if 0 <= x < w:
+                img_with_line[:, x:x + 2] = [255, 0, 0]  # 红色线
+        else:
+            for y in range(h):
+                x = int((r - y * np.sin(theta)) / np.cos(theta))
+                if 0 <= x < w:
+                    img_with_line[y, x:x + 2] = [255, 0, 0]  # 红色线
 
-        # 极坐标方程：x*cos(theta) + y*sin(theta) = r
-        # 计算直线与图像边界的交点
-        cos_t = np.cos(theta)
-        sin_t = np.sin(theta)
-
-        if np.abs(sin_t) > 1e-6 and np.abs(cos_t) > 1e-6:
-            x0 = r / cos_t
-            x1 = (r - h * sin_t) / cos_t
-            pt1 = (int(np.clip(x0, 0, w)), 0)
-            pt2 = (int(np.clip(x1, 0, w)), h)
-        elif np.abs(cos_t) <= 1e-6:  # 近似垂直
-            x = int(np.clip(r / cos_t if cos_t != 0 else 0, 0, w))
-            pt1 = (x, 0)
-            pt2 = (x, h)
-        else:  # 近似水平
-            y = int(np.clip(r, 0, h))
-            pt1 = (0, y)
-            pt2 = (w, y)
-
-        cv2.line(img_copy, pt1, pt2, (0, 0, 255), 2)
-        plt.figure(figsize=(10, 8))
-        plt.imshow(cv2.cvtColor(img_copy, cv2.COLOR_BGR2RGB))
-        plt.title(f"镜像对称轴 (r={r:.2f}, 角度={np.rad2deg(theta):.2f}°)")
+        # 显示结果
+        plt.figure(figsize=(8, 6))
+        plt.imshow(img_with_line)
         plt.axis('off')
+        plt.title(title)
         plt.show()
 
 
-def detecting_mirrorLine(image_path):
-    """主函数：检测图像的镜像对称轴"""
-    try:
-        detector = Mirror_Symmetry_detection(image_path)
-    except Exception as e:
-        print(f"初始化失败: {e}")
-        return
+def angle_with_x_axis(pt1, pt2):
+    """
+    计算两点连线与x轴的夹角（弧度制）
+    """
+    delta_y = pt2[1] - pt1[1]
+    delta_x = pt2[0] - pt1[0]
 
-    matches = detector.find_matchpoints()
-    if len(matches) < 5:
-        print(f"匹配点数量不足（仅{len(matches)}个），无法检测对称轴")
-        return
+    if delta_x == 0 and delta_y == 0:
+        return 0  # 避免两点重合的情况
 
-    detector.draw_matches(matches)
-
-    r_list, theta_list = detector.find_points_r_theta(matches)
-    hexbin = detector.draw_hex(r_list, theta_list)
-
-    sorted_idx, counts = detector.sort_hexbin_by_votes(hexbin)
-    max_r, max_theta = detector.find_coordinate_maxhexbin(hexbin, sorted_idx)
-
-    detector.draw_mirrorLine(max_r, max_theta)
+    angle = np.arctan2(delta_y, delta_x)  # 修复函数调用错误（arctan -> arctan2）
+    # 确保角度在0到pi之间
+    if angle < 0:
+        angle += np.pi
+    return angle
 
 
-def test_case(image_pattern):
-    """批量处理图像（支持通配符路径）"""
-    image_paths = glob.glob(image_pattern)
-    if not image_paths:
-        print(f"未找到匹配的图像: {image_pattern}")
-        return
-
-    for img_path in image_paths:
-        print(f"\n处理图像: {img_path}")
-        detecting_mirrorLine(img_path)
-
-
-if __name__ == "__main__":
-    test_case("*.jpg")
-    test_case("*.png")
+def midpoint(pt1, pt2):
+    """
+    计算两点的中点坐标
+    """
+    mx = (pt1[0] + pt2[0]) / 2
+    my = (pt1[1] + pt2[1]) / 2
+    return mx, my
